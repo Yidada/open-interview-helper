@@ -1,6 +1,6 @@
 {
   "name": "interview-coder-v1",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "main": "dist-electron/main.js",
   "author": "",
   "license": "ISC",
@@ -9,9 +9,9 @@
     "dev": "vite",
     "build": "tsc && vite build && electron-builder",
     "preview": "vite preview",
-    "start": "electron-forge start",
-    "package": "electron-forge package",
-    "make": "electron-forge make",
+    "start": "electron .",
+    "package": "electron-builder",
+    "make": "npm run build && electron-builder",
     "extract": "node source-map-extractor.js"
   },
   "dependencies": {
@@ -22,7 +22,6 @@
     "@radix-ui/react-label": "^2.1.0",
     "@radix-ui/react-slot": "^1.1.0",
     "@radix-ui/react-toast": "^1.2.2",
-    "@supabase/supabase-js": "^2.39.0",
     "@tanstack/react-query": "^5.64.0",
     "axios": "^1.7.7",
     "class-variance-authority": "^0.7.1",
@@ -82,18 +81,31 @@
     },
     "files": [
       "dist/**/*",
-      "dist-electron/**/*"
+      "dist-electron/**/*",
+      "electron/api/**/*"
     ],
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "category": "public.app-category.developer-tools"
     },
     "win": {
-      "target": ["nsis"]
+      "target": [
+        "nsis"
+      ]
     },
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "category": "Development"
-    }
+    },
+    "extraResources": [
+      {
+        "from": "electron/api",
+        "to": "app/electron/api"
+      }
+    ]
   }
 }

@@ -6,6 +6,8 @@ import { ScreenshotHelper } from "./ScreenshotHelper"
 import { ShortcutsHelper } from "./shortcuts"
 import { initAutoUpdater } from "./autoUpdater"
 import * as dotenv from "dotenv"
+import * as os from "os"
+import * as fs from "fs"
 
 // Constants
 const isDev = !app.isPackaged
@@ -468,31 +470,35 @@ function setWindowDimensions(width: number, height: number): void {
   }
 }
 
-// Environment setup
+// Load environment variables from .env and .zshrc
 function loadEnvVariables() {
-  if (isDev) {
-    console.log("Loading env variables from:", path.join(process.cwd(), ".env"))
-    dotenv.config({ path: path.join(process.cwd(), ".env") })
-  } else {
-    console.log(
-      "Loading env variables from:",
-      path.join(process.resourcesPath, ".env")
-    )
-    dotenv.config({ path: path.join(process.resourcesPath, ".env") })
+  // Load environment variables from .env file
+  dotenv.config()
+
+  // If ANTHROPIC_API_KEY isn't set already, try to get it from global environment variable
+  if (!process.env.ANTHROPIC_API_KEY) {
+    if (process.env.anthropic_key) {
+      process.env.ANTHROPIC_API_KEY = process.env.anthropic_key
+      console.log('Loaded Anthropic API key from global environment variable anthropic_key')
+    } else {
+      console.log('No Anthropic API key found in environment variables. Please set ANTHROPIC_API_KEY or anthropic_key.')
+    }
   }
-  console.log("Loaded environment variables:", {
-    VITE_SUPABASE_URL: process.env.VITE_SUPABASE_URL ? "exists" : "missing",
-    VITE_SUPABASE_ANON_KEY: process.env.VITE_SUPABASE_ANON_KEY
-      ? "exists"
-      : "missing"
-  })
 }
 
 // Initialize application
 async function initializeApp() {
   try {
+    // Load environment variables
     loadEnvVariables()
+
+    // Create main application window
+    await createWindow()
+
+    // Initialize helpers after window creation
     initializeHelpers()
+
+    // Set up IPC handlers
     initializeIpcHandlers({
       getMainWindow,
       setWindowDimensions,
@@ -520,20 +526,14 @@ async function initializeApp() {
         ),
       moveWindowUp: () => moveWindowVertical((y) => y - state.step),
       moveWindowDown: () => moveWindowVertical((y) => y + state.step)
-    })
-    await createWindow()
-    state.shortcutsHelper?.registerGlobalShortcuts()
+    } as IIpcHandlerDeps)
 
-    // Initialize auto-updater regardless of environment
-    initAutoUpdater()
-    console.log(
-      "Auto-updater initialized in",
-      isDev ? "development" : "production",
-      "mode"
-    )
+    // Initialize auto-updater
+    if (!isDev) {
+      initAutoUpdater()
+    }
   } catch (error) {
-    console.error("Failed to initialize application:", error)
-    app.quit()
+    console.error("Error initializing app:", error)
   }
 }
 

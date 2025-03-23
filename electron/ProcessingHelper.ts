@@ -5,11 +5,9 @@ import { IProcessingHelperDeps } from "./main"
 import axios from "axios"
 import { app } from "electron"
 import { BrowserWindow } from "electron"
+import { anthropicClient } from "./api"
 
 const isDev = !app.isPackaged
-const API_BASE_URL = isDev
-  ? "http://localhost:3000"
-  : "https://www.interviewcoder.co"
 
 export class ProcessingHelper {
   private deps: IProcessingHelperDeps
@@ -151,60 +149,39 @@ export class ProcessingHelper {
           }))
         )
 
-        const result = await this.processScreenshotsHelper(screenshots, signal)
+        // Use the helper to process screenshots
+        const result = await this.processScreenshotsHelper(
+          screenshots.map(({ path, data }) => ({ path, data })),
+          signal
+        )
 
         if (!result.success) {
-          console.log("Processing failed:", result.error)
-          if (result.error?.includes("API Key out of credits")) {
-            mainWindow.webContents.send(
-              this.deps.PROCESSING_EVENTS.OUT_OF_CREDITS
-            )
-          } else if (result.error?.includes("OpenAI API key not found")) {
-            mainWindow.webContents.send(
-              this.deps.PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR,
-              "OpenAI API key not found in environment variables. Please set the OPEN_AI_API_KEY environment variable."
-            )
-          } else {
-            mainWindow.webContents.send(
-              this.deps.PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR,
-              result.error
-            )
-          }
-          // Reset view back to queue on error
-          console.log("Resetting view to queue due to error")
-          this.deps.setView("queue")
-          return
+          // If processing failed, notify the renderer
+          mainWindow.webContents.send(
+            this.deps.PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR,
+            result.error
+          )
         }
 
-        // Only set view to solutions if processing succeeded
-        console.log("Setting view to solutions after successful processing")
-        mainWindow.webContents.send(
-          this.deps.PROCESSING_EVENTS.SOLUTION_SUCCESS,
-          result.data
-        )
-        this.deps.setView("solutions")
+        // Decrement credits if successful processing
+        if (result.success) {
+          // Go to solutions view
+          this.deps.setView("solutions")
+          // Decrement credits
+          const mainWindow = this.deps.getMainWindow()
+          if (mainWindow) {
+            await mainWindow.webContents.executeJavaScript(
+              "window.api.decrementCredits()"
+            )
+          }
+        }
       } catch (error: any) {
+        const errorMessage = error.message || "Unknown error"
+        console.error("Error processing screenshots:", errorMessage)
         mainWindow.webContents.send(
           this.deps.PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR,
-          error
+          errorMessage
         )
-        console.error("Processing error:", error)
-        if (axios.isCancel(error)) {
-          mainWindow.webContents.send(
-            this.deps.PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR,
-            "Processing was canceled by the user."
-          )
-        } else {
-          mainWindow.webContents.send(
-            this.deps.PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR,
-            error.message || "Server error. Please try again."
-          )
-        }
-        // Reset view back to queue on error
-        console.log("Resetting view to queue due to error")
-        this.deps.setView("queue")
-      } finally {
-        this.currentProcessingAbortController = null
       }
     } else {
       // view == 'solutions'
@@ -286,34 +263,22 @@ export class ProcessingHelper {
         const language = await this.getLanguage()
         let problemInfo
 
-        // First API call - extract problem info
+        // First API call - extract problem info using Anthropic API
         try {
-          const token = await this.getAuthToken()
-          if (!token) {
+          // Check if Anthropic client is configured
+          if (!anthropicClient.isConfigured()) {
             return {
               success: false,
-              error: "Authentication required. Please log in."
+              error: "Anthropic API key not configured. Please check your .zshrc file or environment variables."
             }
           }
 
-          const extractResponse = await axios.post(
-            `${API_BASE_URL}/api/extract`,
-            { imageDataList, language },
-            {
-              signal,
-              timeout: 300000,
-              validateStatus: function (status) {
-                return status < 500
-              },
-              maxRedirects: 5,
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${token}`
-              }
-            }
+          // Use Anthropic client to process images
+          problemInfo = await anthropicClient.processImages(
+            imageDataList,
+            language,
+            { signal }
           )
-
-          problemInfo = extractResponse.data
 
           // Store problem info in AppState
           this.deps.setProblemInfo(problemInfo)
@@ -351,53 +316,9 @@ export class ProcessingHelper {
           }
 
           console.error("API Error Details:", {
-            status: error.response?.status,
-            data: error.response?.data,
             message: error.message,
             code: error.code
           })
-
-          // Handle API-specific errors
-          if (
-            error.response?.data?.error &&
-            typeof error.response.data.error === "string"
-          ) {
-            if (error.response.status === 401) {
-              // Clear any stored session if auth fails
-              await mainWindow?.webContents.executeJavaScript(
-                "window.supabase?.auth?.signOut()"
-              )
-              return {
-                success: false,
-                error: "Your session has expired. Please sign in again."
-              }
-            }
-            if (error.response.data.error === "No token provided") {
-              return {
-                success: false,
-                error: "Please sign in to continue."
-              }
-            }
-            if (error.response.data.error === "Invalid token") {
-              // Clear any stored session if token is invalid
-              await mainWindow?.webContents.executeJavaScript(
-                "window.supabase?.auth?.signOut()"
-              )
-              return {
-                success: false,
-                error: "Your session has expired. Please sign in again."
-              }
-            }
-            if (error.response.data.error.includes("Operation timed out")) {
-              throw new Error(
-                "Operation timed out after 1 minute. Please try again."
-              )
-            }
-            if (error.response.data.error.includes("API Key out of credits")) {
-              throw new Error(error.response.data.error)
-            }
-            throw new Error(error.response.data.error)
-          }
 
           // If we get here, it's an unknown error
           throw new Error(error.message || "Server error. Please try again.")
@@ -407,7 +328,6 @@ export class ProcessingHelper {
         console.error("Processing error details:", {
           message: error.message,
           code: error.code,
-          response: error.response?.data,
           retryCount
         })
 
@@ -432,132 +352,52 @@ export class ProcessingHelper {
     try {
       const problemInfo = this.deps.getProblemInfo()
       const language = await this.getLanguage()
-      const token = await this.getAuthToken()
 
       if (!problemInfo) {
         throw new Error("No problem info available")
       }
 
-      if (!token) {
+      // Check if Anthropic client is configured
+      if (!anthropicClient.isConfigured()) {
         return {
           success: false,
-          error: "Authentication required. Please log in."
+          error: "Anthropic API key not configured. Please check your .zshrc file or environment variables."
         }
       }
 
-      const response = await axios.post(
-        `${API_BASE_URL}/api/generate`,
-        { ...problemInfo, language },
-        {
-          signal,
-          timeout: 300000,
-          validateStatus: function (status) {
-            return status < 500
-          },
-          maxRedirects: 5,
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`
-          }
-        }
+      // Use Anthropic client to generate solution
+      const solutionData = await anthropicClient.generateSolution(
+        problemInfo,
+        language,
+        { signal }
       )
 
-      return { success: true, data: response.data }
+      return { success: true, data: solutionData }
     } catch (error: any) {
       const mainWindow = this.deps.getMainWindow()
 
-      // Handle timeout errors (both 504 and axios timeout)
-      if (error.code === "ECONNABORTED" || error.response?.status === 504) {
-        // Cancel ongoing API requests
-        this.cancelOngoingRequests()
-        // Clear both screenshot queues
-        this.deps.clearQueues()
-        // Update view state to queue
-        this.deps.setView("queue")
-        // Notify renderer to switch view
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("reset-view")
-          mainWindow.webContents.send(
-            this.deps.PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR,
-            "Request timed out. The server took too long to respond. Please try again."
-          )
-        }
+      // Handle cancellation errors
+      if (axios.isCancel(error)) {
+        console.log("Solution generation was canceled")
         return {
           success: false,
-          error: "Request timed out. Please try again."
+          error: "Solution generation was canceled."
         }
       }
 
-      if (error.response?.status === 401) {
-        if (mainWindow) {
-          // Clear any stored session if auth fails
-          await mainWindow.webContents.executeJavaScript(
-            "window.supabase?.auth?.signOut()"
-          )
-          mainWindow.webContents.send(
-            this.deps.PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR,
-            "Your session has expired. Please sign in again."
-          )
-        }
-        return {
-          success: false,
-          error: "Your session has expired. Please sign in again."
-        }
-      }
-
-      if (error.response?.data?.error === "No token provided") {
-        if (mainWindow) {
-          mainWindow.webContents.send(
-            this.deps.PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR,
-            "Please sign in to continue."
-          )
-        }
-        return {
-          success: false,
-          error: "Please sign in to continue."
-        }
-      }
-
-      if (error.response?.data?.error === "Invalid token") {
-        if (mainWindow) {
-          // Clear any stored session if token is invalid
-          await mainWindow.webContents.executeJavaScript(
-            "window.supabase?.auth?.signOut()"
-          )
-          mainWindow.webContents.send(
-            this.deps.PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR,
-            "Your session has expired. Please sign in again."
-          )
-        }
-        return {
-          success: false,
-          error: "Your session has expired. Please sign in again."
-        }
-      }
-
-      if (error.response?.data?.error?.includes("API Key out of credits")) {
-        if (mainWindow) {
-          mainWindow.webContents.send(
-            this.deps.PROCESSING_EVENTS.OUT_OF_CREDITS
-          )
-        }
-        return { success: false, error: error.response.data.error }
-      }
-
-      if (
-        error.response?.data?.error?.includes(
-          "Please close this window and re-enter a valid Open AI API key."
+      console.error("Solution generation error:", error.message)
+      
+      if (mainWindow) {
+        mainWindow.webContents.send(
+          this.deps.PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR,
+          error.message
         )
-      ) {
-        if (mainWindow) {
-          mainWindow.webContents.send(
-            this.deps.PROCESSING_EVENTS.API_KEY_INVALID
-          )
-        }
-        return { success: false, error: error.response.data.error }
       }
 
-      return { success: false, error: error.message }
+      return {
+        success: false,
+        error: error.message || "Failed to generate solution"
+      }
     }
   }
 
@@ -565,143 +405,138 @@ export class ProcessingHelper {
     screenshots: Array<{ path: string; data: string }>,
     signal: AbortSignal
   ) {
-    try {
-      const imageDataList = screenshots.map((screenshot) => screenshot.data)
-      const problemInfo = this.deps.getProblemInfo()
-      const language = await this.getLanguage()
-      const token = await this.getAuthToken()
+    const MAX_RETRIES = 0
+    let retryCount = 0
 
-      if (!problemInfo) {
-        throw new Error("No problem info available")
-      }
+    while (retryCount <= MAX_RETRIES) {
+      try {
+        const imageDataList = screenshots.map((screenshot) => screenshot.data)
+        const mainWindow = this.deps.getMainWindow()
+        const language = await this.getLanguage()
+        const problemInfo = this.deps.getProblemInfo()
 
-      if (!token) {
-        return {
-          success: false,
-          error: "Authentication required. Please log in."
+        if (!problemInfo) {
+          throw new Error("No problem info available")
         }
-      }
 
-      const response = await axios.post(
-        `${API_BASE_URL}/api/debug`,
-        { imageDataList, problemInfo, language },
-        {
-          signal,
-          timeout: 300000,
-          validateStatus: function (status) {
-            return status < 500
-          },
-          maxRedirects: 5,
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`
+        // Get existing solution
+        let existingSolution = ""
+        if (
+          problemInfo.solution &&
+          typeof problemInfo.solution === "string" &&
+          problemInfo.solution.trim().length > 0
+        ) {
+          existingSolution = problemInfo.solution
+        } else if (
+          problemInfo.solution_data &&
+          problemInfo.solution_data.solution &&
+          typeof problemInfo.solution_data.solution === "string"
+        ) {
+          existingSolution = problemInfo.solution_data.solution
+        }
+
+        if (!existingSolution) {
+          throw new Error("No existing solution found to debug")
+        }
+
+        // Get error details from the screenshots
+        try {
+          // Check if Anthropic client is configured
+          if (!anthropicClient.isConfigured()) {
+            return {
+              success: false,
+              error: "Anthropic API key not configured. Please check your .zshrc file or environment variables."
+            }
           }
-        }
-      )
 
-      return { success: true, data: response.data }
-    } catch (error: any) {
-      const mainWindow = this.deps.getMainWindow()
+          // First extract error details from the screenshots
+          const errorData = await anthropicClient.processImages(
+            imageDataList,
+            language,
+            { 
+              signal,
+              maxTokens: 1000, // Smaller token limit for extracting error
+              temperature: 0.2 // Lower temperature for more focused response
+            }
+          )
 
-      // Handle cancellation first
-      if (axios.isCancel(error)) {
-        return {
-          success: false,
-          error: "Processing was canceled by the user."
+          // Use the error details and the existing solution to debug
+          const errorDescription = typeof errorData === "string" 
+            ? errorData 
+            : errorData.description || JSON.stringify(errorData);
+
+          // Generate debug solution
+          const debugResult = await anthropicClient.debugSolution(
+            problemInfo,
+            existingSolution,
+            errorDescription,
+            language,
+            { signal }
+          )
+
+          // Combine and update the problem info
+          const updatedProblemInfo = {
+            ...problemInfo,
+            debug_solution: debugResult.debug_solution,
+            debug_data: debugResult
+          }
+
+          // Store updated problem info
+          this.deps.setProblemInfo(updatedProblemInfo)
+
+          if (mainWindow) {
+            mainWindow.webContents.send(
+              this.deps.PROCESSING_EVENTS.DEBUG_SUCCESS,
+              debugResult
+            )
+          }
+
+          return { success: true, data: debugResult }
+        } catch (error: any) {
+          // If the request was cancelled, don't retry
+          if (axios.isCancel(error)) {
+            return {
+              success: false,
+              error: "Debug processing was canceled by the user."
+            }
+          }
+
+          console.error("Debug API Error Details:", {
+            message: error.message,
+            code: error.code
+          })
+
+          throw new Error(error.message || "Debug error. Please try again.")
         }
+      } catch (error: any) {
+        // Log the full error for debugging
+        console.error("Debug error details:", {
+          message: error.message,
+          code: error.code,
+          retryCount
+        })
+
+        // If it's a cancellation or we've exhausted retries, return the error
+        if (axios.isCancel(error) || retryCount >= MAX_RETRIES) {
+          const mainWindow = this.deps.getMainWindow()
+          if (mainWindow) {
+            mainWindow.webContents.send(
+              this.deps.PROCESSING_EVENTS.DEBUG_ERROR,
+              error.message
+            )
+          }
+          return { success: false, error: error.message }
+        }
+
+        // Increment retry count and continue
+        retryCount++
       }
+    }
 
-      if (error.response?.status === 401) {
-        if (mainWindow) {
-          // Clear any stored session if auth fails
-          await mainWindow.webContents.executeJavaScript(
-            "window.supabase?.auth?.signOut()"
-          )
-          mainWindow.webContents.send(
-            this.deps.PROCESSING_EVENTS.DEBUG_ERROR,
-            "Your session has expired. Please sign in again."
-          )
-        }
-        return {
-          success: false,
-          error: "Your session has expired. Please sign in again."
-        }
-      }
-
-      if (error.response?.data?.error === "No token provided") {
-        if (mainWindow) {
-          mainWindow.webContents.send(
-            this.deps.PROCESSING_EVENTS.DEBUG_ERROR,
-            "Please sign in to continue."
-          )
-        }
-        return {
-          success: false,
-          error: "Please sign in to continue."
-        }
-      }
-
-      if (error.response?.data?.error === "Invalid token") {
-        if (mainWindow) {
-          // Clear any stored session if token is invalid
-          await mainWindow.webContents.executeJavaScript(
-            "window.supabase?.auth?.signOut()"
-          )
-          mainWindow.webContents.send(
-            this.deps.PROCESSING_EVENTS.DEBUG_ERROR,
-            "Your session has expired. Please sign in again."
-          )
-        }
-        return {
-          success: false,
-          error: "Your session has expired. Please sign in again."
-        }
-      }
-
-      if (error.response?.data?.error?.includes("Operation timed out")) {
-        // Cancel ongoing API requests
-        this.cancelOngoingRequests()
-        // Clear both screenshot queues
-        this.deps.clearQueues()
-        // Update view state to queue
-        this.deps.setView("queue")
-        // Notify renderer to switch view
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("reset-view")
-          mainWindow.webContents.send(
-            this.deps.PROCESSING_EVENTS.DEBUG_ERROR,
-            "Operation timed out after 1 minute. Please try again."
-          )
-        }
-        return {
-          success: false,
-          error: "Operation timed out after 1 minute. Please try again."
-        }
-      }
-
-      if (error.response?.data?.error?.includes("API Key out of credits")) {
-        if (mainWindow) {
-          mainWindow.webContents.send(
-            this.deps.PROCESSING_EVENTS.OUT_OF_CREDITS
-          )
-        }
-        return { success: false, error: error.response.data.error }
-      }
-
-      if (
-        error.response?.data?.error?.includes(
-          "Please close this window and re-enter a valid Open AI API key."
-        )
-      ) {
-        if (mainWindow) {
-          mainWindow.webContents.send(
-            this.deps.PROCESSING_EVENTS.API_KEY_INVALID
-          )
-        }
-        return { success: false, error: error.response.data.error }
-      }
-
-      return { success: false, error: error.message }
+    // If we get here, all retries failed
+    return {
+      success: false,
+      error: "Failed to debug after multiple attempts. Please try again."
     }
   }
 
@@ -730,6 +565,88 @@ export class ProcessingHelper {
     if (wasCancelled && mainWindow && !mainWindow.isDestroyed()) {
       // Send a clear message that processing was cancelled
       mainWindow.webContents.send(this.deps.PROCESSING_EVENTS.NO_SCREENSHOTS)
+    }
+  }
+
+  // Add the processExtraScreenshots method for debugging
+  public async processExtraScreenshots(): Promise<void> {
+    const mainWindow = this.deps.getMainWindow()
+    if (!mainWindow) return
+
+    // Check if we have any credits left
+    const credits = await this.getCredits()
+    if (credits < 1) {
+      mainWindow.webContents.send(this.deps.PROCESSING_EVENTS.OUT_OF_CREDITS)
+      return
+    }
+
+    // Notify the renderer that debug processing is starting
+    mainWindow.webContents.send(this.deps.PROCESSING_EVENTS.DEBUG_START)
+
+    // Get the current view and ensure we're in the solutions view
+    const view = this.deps.getView()
+    if (view !== "solutions") {
+      console.warn("Attempted to process extra screenshots outside of solutions view")
+      return
+    }
+
+    // Get the extra screenshot queue
+    const extraScreenshotQueue = this.screenshotHelper.getExtraScreenshotQueue()
+    console.log("Processing extra screenshots for debugging:", extraScreenshotQueue)
+    
+    if (extraScreenshotQueue.length === 0) {
+      mainWindow.webContents.send(this.deps.PROCESSING_EVENTS.NO_SCREENSHOTS)
+      return
+    }
+
+    try {
+      // Initialize AbortController for this operation
+      this.currentExtraProcessingAbortController = new AbortController()
+      const { signal } = this.currentExtraProcessingAbortController
+
+      // Process the screenshots
+      const screenshots = await Promise.all(
+        extraScreenshotQueue.map(async (path) => ({
+          path,
+          preview: await this.screenshotHelper.getImagePreview(path),
+          data: fs.readFileSync(path).toString("base64")
+        }))
+      )
+
+      // Use the helper to process the extra screenshots
+      const result = await this.processExtraScreenshotsHelper(
+        screenshots.map(({ path, data }) => ({ path, data })),
+        signal
+      )
+
+      if (!result.success) {
+        // If processing failed, notify the renderer
+        mainWindow.webContents.send(
+          this.deps.PROCESSING_EVENTS.DEBUG_ERROR,
+          result.error
+        )
+      }
+
+      // Decrement credits if successful processing
+      if (result.success) {
+        // Update view to debug
+        this.deps.setView("debug")
+        this.deps.setHasDebugged(true)
+        
+        // Decrement credits
+        if (mainWindow) {
+          await mainWindow.webContents.executeJavaScript(
+            "window.api.decrementCredits()"
+          )
+        }
+      }
+    } catch (error: any) {
+      const errorMessage = error.message || "Unknown error"
+      console.error("Error processing extra screenshots:", errorMessage)
+      mainWindow.webContents.send(
+        this.deps.PROCESSING_EVENTS.DEBUG_ERROR,
+        errorMessage
+      )
     }
   }
 }

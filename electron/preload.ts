@@ -4,10 +4,6 @@ const { shell } = require("electron")
 
 // Types for the exposed Electron API
 interface ElectronAPI {
-  openSubscriptionPortal: (authData: {
-    id: string
-    email: string
-  }) => Promise<{ success: boolean; error?: string }>
   updateContentDimensions: (dimensions: {
     width: number
     height: number
@@ -37,22 +33,19 @@ interface ElectronAPI {
   openExternal: (url: string) => void
   toggleMainWindow: () => Promise<{ success: boolean; error?: string }>
   triggerScreenshot: () => Promise<{ success: boolean; error?: string }>
-  triggerProcessScreenshots: () => Promise<{ success: boolean; error?: string }>
-  triggerReset: () => Promise<{ success: boolean; error?: string }>
-  triggerMoveLeft: () => Promise<{ success: boolean; error?: string }>
-  triggerMoveRight: () => Promise<{ success: boolean; error?: string }>
-  triggerMoveUp: () => Promise<{ success: boolean; error?: string }>
-  triggerMoveDown: () => Promise<{ success: boolean; error?: string }>
-  onSubscriptionUpdated: (callback: () => void) => () => void
-  onSubscriptionPortalClosed: (callback: () => void) => () => void
-  startUpdate: () => Promise<{ success: boolean; error?: string }>
-  installUpdate: () => void
+  processScreenshots: () => Promise<{ success: boolean; error?: string }>
+  processExtraScreenshots: () => Promise<{ success: boolean; error?: string }>
+  reset: () => Promise<{ success: boolean; error?: string }>
+  moveLeft: () => Promise<{ success: boolean; error?: string }>
+  moveRight: () => Promise<{ success: boolean; error?: string }>
+  moveUp: () => Promise<{ success: boolean; error?: string }>
+  moveDown: () => Promise<{ success: boolean; error?: string }>
+  onOutOfCredits: (callback: () => void) => () => void
   onUpdateAvailable: (callback: (info: any) => void) => () => void
   onUpdateDownloaded: (callback: (info: any) => void) => () => void
   decrementCredits: () => Promise<void>
   onCreditsUpdated: (callback: (credits: number) => void) => () => void
-  onOutOfCredits: (callback: () => void) => () => void
-  getPlatform: () => string
+  getPlatform: () => Promise<string>
 }
 
 export const PROCESSING_EVENTS = {
@@ -78,10 +71,6 @@ export const PROCESSING_EVENTS = {
 console.log("Preload script is running")
 
 const electronAPI = {
-  openSubscriptionPortal: async (authData: { id: string; email: string }) => {
-    return ipcRenderer.invoke("open-subscription-portal", authData)
-  },
-  openSettingsPortal: () => ipcRenderer.invoke("open-settings-portal"),
   updateContentDimensions: (dimensions: { width: number; height: number }) =>
     ipcRenderer.invoke("update-content-dimensions", dimensions),
   clearStore: () => ipcRenderer.invoke("clear-store"),
@@ -99,7 +88,6 @@ const electronAPI = {
       throw error
     }
   },
-  // Event listeners
   onScreenshotTaken: (
     callback: (data: { path: string; preview: string }) => void
   ) => {
@@ -119,116 +107,85 @@ const electronAPI = {
   },
   onSolutionStart: (callback: () => void) => {
     const subscription = () => callback()
-    ipcRenderer.on(PROCESSING_EVENTS.INITIAL_START, subscription)
+    ipcRenderer.on("initial-start", subscription)
     return () => {
-      ipcRenderer.removeListener(PROCESSING_EVENTS.INITIAL_START, subscription)
+      ipcRenderer.removeListener("initial-start", subscription)
     }
   },
   onDebugStart: (callback: () => void) => {
     const subscription = () => callback()
-    ipcRenderer.on(PROCESSING_EVENTS.DEBUG_START, subscription)
+    ipcRenderer.on("debug-start", subscription)
     return () => {
-      ipcRenderer.removeListener(PROCESSING_EVENTS.DEBUG_START, subscription)
-    }
-  },
-  onDebugSuccess: (callback: (data: any) => void) => {
-    ipcRenderer.on("debug-success", (_event, data) => callback(data))
-    return () => {
-      ipcRenderer.removeListener("debug-success", (_event, data) =>
-        callback(data)
-      )
-    }
-  },
-  onDebugError: (callback: (error: string) => void) => {
-    const subscription = (_: any, error: string) => callback(error)
-    ipcRenderer.on(PROCESSING_EVENTS.DEBUG_ERROR, subscription)
-    return () => {
-      ipcRenderer.removeListener(PROCESSING_EVENTS.DEBUG_ERROR, subscription)
+      ipcRenderer.removeListener("debug-start", subscription)
     }
   },
   onSolutionError: (callback: (error: string) => void) => {
     const subscription = (_: any, error: string) => callback(error)
-    ipcRenderer.on(PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR, subscription)
+    ipcRenderer.on("solution-error", subscription)
     return () => {
-      ipcRenderer.removeListener(
-        PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR,
-        subscription
-      )
+      ipcRenderer.removeListener("solution-error", subscription)
+    }
+  },
+  onDebugError: (callback: (error: string) => void) => {
+    const subscription = (_: any, error: string) => callback(error)
+    ipcRenderer.on("debug-error", subscription)
+    return () => {
+      ipcRenderer.removeListener("debug-error", subscription)
+    }
+  },
+  onDebugSuccess: (callback: (data: any) => void) => {
+    const subscription = (_: any, data: any) => callback(data)
+    ipcRenderer.on("debug-success", subscription)
+    return () => {
+      ipcRenderer.removeListener("debug-success", subscription)
     }
   },
   onProcessingNoScreenshots: (callback: () => void) => {
     const subscription = () => callback()
-    ipcRenderer.on(PROCESSING_EVENTS.NO_SCREENSHOTS, subscription)
+    ipcRenderer.on("processing-no-screenshots", subscription)
     return () => {
-      ipcRenderer.removeListener(PROCESSING_EVENTS.NO_SCREENSHOTS, subscription)
-    }
-  },
-  onOutOfCredits: (callback: () => void) => {
-    const subscription = () => callback()
-    ipcRenderer.on(PROCESSING_EVENTS.OUT_OF_CREDITS, subscription)
-    return () => {
-      ipcRenderer.removeListener(PROCESSING_EVENTS.OUT_OF_CREDITS, subscription)
+      ipcRenderer.removeListener("processing-no-screenshots", subscription)
     }
   },
   onProblemExtracted: (callback: (data: any) => void) => {
     const subscription = (_: any, data: any) => callback(data)
-    ipcRenderer.on(PROCESSING_EVENTS.PROBLEM_EXTRACTED, subscription)
+    ipcRenderer.on("problem-extracted", subscription)
     return () => {
-      ipcRenderer.removeListener(
-        PROCESSING_EVENTS.PROBLEM_EXTRACTED,
-        subscription
-      )
+      ipcRenderer.removeListener("problem-extracted", subscription)
     }
   },
   onSolutionSuccess: (callback: (data: any) => void) => {
     const subscription = (_: any, data: any) => callback(data)
-    ipcRenderer.on(PROCESSING_EVENTS.SOLUTION_SUCCESS, subscription)
+    ipcRenderer.on("solution-success", subscription)
     return () => {
-      ipcRenderer.removeListener(
-        PROCESSING_EVENTS.SOLUTION_SUCCESS,
-        subscription
-      )
+      ipcRenderer.removeListener("solution-success", subscription)
     }
   },
   onUnauthorized: (callback: () => void) => {
     const subscription = () => callback()
-    ipcRenderer.on(PROCESSING_EVENTS.UNAUTHORIZED, subscription)
+    ipcRenderer.on("procesing-unauthorized", subscription)
     return () => {
-      ipcRenderer.removeListener(PROCESSING_EVENTS.UNAUTHORIZED, subscription)
+      ipcRenderer.removeListener("procesing-unauthorized", subscription)
     }
   },
-  openExternal: (url: string) => shell.openExternal(url),
+  onOutOfCredits: (callback: () => void) => {
+    const subscription = () => callback()
+    ipcRenderer.on("out-of-credits", subscription)
+    return () => {
+      ipcRenderer.removeListener("out-of-credits", subscription)
+    }
+  },
+  openExternal: (url: string) => ipcRenderer.invoke("open-external", url),
+
   triggerScreenshot: () => ipcRenderer.invoke("trigger-screenshot"),
-  triggerProcessScreenshots: () =>
-    ipcRenderer.invoke("trigger-process-screenshots"),
-  triggerReset: () => ipcRenderer.invoke("trigger-reset"),
-  triggerMoveLeft: () => ipcRenderer.invoke("trigger-move-left"),
-  triggerMoveRight: () => ipcRenderer.invoke("trigger-move-right"),
-  triggerMoveUp: () => ipcRenderer.invoke("trigger-move-up"),
-  triggerMoveDown: () => ipcRenderer.invoke("trigger-move-down"),
-  onSubscriptionUpdated: (callback: () => void) => {
-    const subscription = () => callback()
-    ipcRenderer.on("subscription-updated", subscription)
-    return () => {
-      ipcRenderer.removeListener("subscription-updated", subscription)
-    }
-  },
-  onSubscriptionPortalClosed: (callback: () => void) => {
-    const subscription = () => callback()
-    ipcRenderer.on("subscription-portal-closed", subscription)
-    return () => {
-      ipcRenderer.removeListener("subscription-portal-closed", subscription)
-    }
-  },
-  onReset: (callback: () => void) => {
-    const subscription = () => callback()
-    ipcRenderer.on(PROCESSING_EVENTS.RESET, subscription)
-    return () => {
-      ipcRenderer.removeListener(PROCESSING_EVENTS.RESET, subscription)
-    }
-  },
-  startUpdate: () => ipcRenderer.invoke("start-update"),
-  installUpdate: () => ipcRenderer.invoke("install-update"),
+  processScreenshots: () => ipcRenderer.invoke("process-screenshots"),
+  processExtraScreenshots: () => ipcRenderer.invoke("process-extra-screenshots"),
+  reset: () => ipcRenderer.invoke("reset"),
+  moveLeft: () => ipcRenderer.invoke("move-left"),
+  moveRight: () => ipcRenderer.invoke("move-right"),
+  moveUp: () => ipcRenderer.invoke("move-up"),
+  moveDown: () => ipcRenderer.invoke("move-down"),
+
   onUpdateAvailable: (callback: (info: any) => void) => {
     const subscription = (_: any, info: any) => callback(info)
     ipcRenderer.on("update-available", subscription)
@@ -251,42 +208,19 @@ const electronAPI = {
       ipcRenderer.removeListener("credits-updated", subscription)
     }
   },
-  getPlatform: () => process.platform
-} as ElectronAPI
+  getPlatform: () => ipcRenderer.invoke("get-platform")
+}
 
-// Before exposing the API
-console.log(
-  "About to expose electronAPI with methods:",
-  Object.keys(electronAPI)
-)
+// Expose the API to the renderer process
+contextBridge.exposeInMainWorld("api", electronAPI)
 
-// Expose the API
-contextBridge.exposeInMainWorld("electronAPI", electronAPI)
+// Add a global initialization flag that ProcessingHelper can check
+contextBridge.exposeInMainWorld("__IS_INITIALIZED__", false)
 
-console.log("electronAPI exposed to window")
+// Add a global credits counter
+contextBridge.exposeInMainWorld("__CREDITS__", 3)
 
-// Add this focus restoration handler
-ipcRenderer.on("restore-focus", () => {
-  // Try to focus the active element if it exists
-  const activeElement = document.activeElement as HTMLElement
-  if (activeElement && typeof activeElement.focus === "function") {
-    activeElement.focus()
-  }
-})
+// Add a global language preference
+contextBridge.exposeInMainWorld("__LANGUAGE__", "python")
 
-// Expose protected methods that allow the renderer process to use
-// the ipcRenderer without exposing the entire object
-contextBridge.exposeInMainWorld("electron", {
-  ipcRenderer: {
-    on: (channel: string, func: (...args: any[]) => void) => {
-      if (channel === "auth-callback") {
-        ipcRenderer.on(channel, (event, ...args) => func(...args))
-      }
-    },
-    removeListener: (channel: string, func: (...args: any[]) => void) => {
-      if (channel === "auth-callback") {
-        ipcRenderer.removeListener(channel, (event, ...args) => func(...args))
-      }
-    }
-  }
-})
+console.log("Preload script completed")

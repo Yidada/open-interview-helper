@@ -1,7 +1,6 @@
 // ipcHandlers.ts
 
 import { ipcMain, shell } from "electron"
-import { createClient } from "@supabase/supabase-js"
 import { randomBytes } from "crypto"
 import { IIpcHandlerDeps } from "./main"
 
@@ -67,6 +66,11 @@ export function initializeIpcHandlers(deps: IIpcHandlerDeps): void {
     await deps.processingHelper?.processScreenshots()
   })
 
+  ipcMain.handle("process-extra-screenshots", async () => {
+    await deps.processingHelper?.processExtraScreenshots()
+    return { success: true }
+  })
+
   // Window dimension handlers
   ipcMain.handle(
     "update-content-dimensions",
@@ -99,180 +103,108 @@ export function initializeIpcHandlers(deps: IIpcHandlerDeps): void {
           }))
         )
       } else {
-        const extraQueue = deps.getExtraScreenshotQueue()
+        const queue = deps.getExtraScreenshotQueue()
         previews = await Promise.all(
-          extraQueue.map(async (path) => ({
+          queue.map(async (path) => ({
             path,
             preview: await deps.getImagePreview(path)
           }))
         )
       }
 
-      return previews
+      return { success: true, previews }
     } catch (error) {
       console.error("Error getting screenshots:", error)
-      throw error
+      return { success: false, error: "Failed to get screenshots" }
     }
   })
 
-  // Screenshot trigger handlers
+  // Screenshot action handlers
   ipcMain.handle("trigger-screenshot", async () => {
-    const mainWindow = deps.getMainWindow()
-    if (mainWindow) {
-      try {
-        const screenshotPath = await deps.takeScreenshot()
-        const preview = await deps.getImagePreview(screenshotPath)
-        mainWindow.webContents.send("screenshot-taken", {
-          path: screenshotPath,
-          preview
-        })
-        return { success: true }
-      } catch (error) {
-        console.error("Error triggering screenshot:", error)
-        return { error: "Failed to trigger screenshot" }
-      }
-    }
-    return { error: "No main window available" }
-  })
-
-  ipcMain.handle("take-screenshot", async () => {
     try {
-      const screenshotPath = await deps.takeScreenshot()
-      const preview = await deps.getImagePreview(screenshotPath)
-      return { path: screenshotPath, preview }
+      const newScreenshotPath = await deps.takeScreenshot()
+      return { success: true, path: newScreenshotPath }
     } catch (error) {
       console.error("Error taking screenshot:", error)
-      return { error: "Failed to take screenshot" }
+      return { success: false, error: "Failed to take screenshot" }
     }
   })
 
-  // Auth related handlers
-  ipcMain.handle("get-pkce-verifier", () => {
-    return randomBytes(32).toString("base64url")
+  // Reset view handlers
+  ipcMain.handle("reset", async () => {
+    try {
+      deps.clearQueues()
+      deps.setView("queue")
+      const mainWindow = deps.getMainWindow()
+      if (mainWindow) {
+        mainWindow.webContents.send("reset-view")
+      }
+      return { success: true }
+    } catch (error) {
+      console.error("Error resetting:", error)
+      return { success: false, error: "Failed to reset" }
+    }
   })
 
-  ipcMain.handle("open-external-url", (event, url: string) => {
+  // Handle opening external links
+  ipcMain.handle("open-external", (event, url: string) => {
     shell.openExternal(url)
   })
 
-  // Subscription handlers
-  ipcMain.handle("open-settings-portal", () => {
-    shell.openExternal("https://www.interviewcoder.co/settings")
-  })
-  ipcMain.handle("open-subscription-portal", async (_event, authData) => {
-    try {
-      const url = "https://www.interviewcoder.co/checkout"
-      await shell.openExternal(url)
-      return { success: true }
-    } catch (error) {
-      console.error("Error opening checkout page:", error)
-      return {
-        success: false,
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to open checkout page"
-      }
-    }
-  })
-
-  // Window management handlers
-  ipcMain.handle("toggle-window", () => {
+  // Window control handlers
+  ipcMain.handle("toggle-window", async () => {
     try {
       deps.toggleMainWindow()
       return { success: true }
     } catch (error) {
       console.error("Error toggling window:", error)
-      return { error: "Failed to toggle window" }
-    }
-  })
-
-  ipcMain.handle("reset-queues", async () => {
-    try {
-      deps.clearQueues()
-      return { success: true }
-    } catch (error) {
-      console.error("Error resetting queues:", error)
-      return { error: "Failed to reset queues" }
-    }
-  })
-
-  // Process screenshot handlers
-  ipcMain.handle("trigger-process-screenshots", async () => {
-    try {
-      await deps.processingHelper?.processScreenshots()
-      return { success: true }
-    } catch (error) {
-      console.error("Error processing screenshots:", error)
-      return { error: "Failed to process screenshots" }
-    }
-  })
-
-  // Reset handlers
-  ipcMain.handle("trigger-reset", () => {
-    try {
-      // First cancel any ongoing requests
-      deps.processingHelper?.cancelOngoingRequests()
-
-      // Clear all queues immediately
-      deps.clearQueues()
-
-      // Reset view to queue
-      deps.setView("queue")
-
-      // Get main window and send reset events
-      const mainWindow = deps.getMainWindow()
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        // Send reset events in sequence
-        mainWindow.webContents.send("reset-view")
-        mainWindow.webContents.send("reset")
-      }
-
-      return { success: true }
-    } catch (error) {
-      console.error("Error triggering reset:", error)
-      return { error: "Failed to trigger reset" }
+      return { success: false, error: "Failed to toggle window" }
     }
   })
 
   // Window movement handlers
-  ipcMain.handle("trigger-move-left", () => {
+  ipcMain.handle("move-left", async () => {
     try {
       deps.moveWindowLeft()
       return { success: true }
     } catch (error) {
       console.error("Error moving window left:", error)
-      return { error: "Failed to move window left" }
+      return { success: false, error: "Failed to move window left" }
     }
   })
 
-  ipcMain.handle("trigger-move-right", () => {
+  ipcMain.handle("move-right", async () => {
     try {
       deps.moveWindowRight()
       return { success: true }
     } catch (error) {
       console.error("Error moving window right:", error)
-      return { error: "Failed to move window right" }
+      return { success: false, error: "Failed to move window right" }
     }
   })
 
-  ipcMain.handle("trigger-move-up", () => {
+  ipcMain.handle("move-up", async () => {
     try {
       deps.moveWindowUp()
       return { success: true }
     } catch (error) {
       console.error("Error moving window up:", error)
-      return { error: "Failed to move window up" }
+      return { success: false, error: "Failed to move window up" }
     }
   })
 
-  ipcMain.handle("trigger-move-down", () => {
+  ipcMain.handle("move-down", async () => {
     try {
       deps.moveWindowDown()
       return { success: true }
     } catch (error) {
       console.error("Error moving window down:", error)
-      return { error: "Failed to move window down" }
+      return { success: false, error: "Failed to move window down" }
     }
+  })
+
+  // Platform info handlers
+  ipcMain.handle("get-platform", () => {
+    return process.platform
   })
 }
